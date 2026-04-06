@@ -9,9 +9,11 @@
     "dev": "tsc --watch"
   },
   "devDependencies": {
+    "@types/node": "^25.5.2",
     "typescript": "^6.0.2"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^17.4.1"
   }
 }
