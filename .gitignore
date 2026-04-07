@@ -20,3 +20,5 @@ npm-debug.log*
 # n8n & Docker data
 n8n_data/
 postgres_data/
+
+todo.md
