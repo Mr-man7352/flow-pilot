@@ -7,11 +7,18 @@ import SettingsDrawer from "./SettingsDrawer";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github.css";
+import WorkflowPreviewCard, { WorkflowPreview } from "./WorkflowPreviewCard";
 
 interface Session {
   id: string;
   title: string;
   updatedAt: string;
+}
+
+function stripPreviewMarker(text: string): string {
+  return text
+    .replace(/<<<WORKFLOW_PREVIEW>>>[\s\S]*?<<<END_WORKFLOW_PREVIEW>>>/g, "")
+    .trim();
 }
 
 export default function ChatInterface() {
@@ -20,6 +27,8 @@ export default function ChatInterface() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [initialMessages, setInitialMessages] = useState<UIMessage[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [workflowPreview, setWorkflowPreview] =
+    useState<WorkflowPreview | null>(null);
   const [apiKey, setApiKey] = useState(
     typeof window !== "undefined"
       ? (localStorage.getItem("mcp_api_key") ?? "")
@@ -85,6 +94,27 @@ export default function ChatInterface() {
   // Auto-scroll
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+
+    for (const m of messages) {
+      if (m.role !== "assistant") continue;
+      const text = m.parts.find((p) => p.type === "text")?.text ?? "";
+      const match = text.match(
+        /<<<WORKFLOW_PREVIEW>>>\s*([\s\S]*?)\s*<<<END_WORKFLOW_PREVIEW>>>/,
+      );
+      if (match) {
+        try {
+          const data = JSON.parse(match[1]);
+          setWorkflowPreview({
+            name: data.name,
+            nodeCount: data.nodeCount,
+            json: data.json,
+          });
+        } catch {
+          // malformed JSON, ignore
+        }
+        break;
+      }
+    }
   }, [messages]);
 
   // Refresh session list after each completed response
@@ -124,6 +154,7 @@ export default function ChatInterface() {
 
   const submit = () => {
     if (!input.trim() || isLoading) return;
+    setWorkflowPreview(null);
     sendMessage({ role: "user", parts: [{ type: "text", text: input }] });
     setInput("");
   };
@@ -227,7 +258,7 @@ export default function ChatInterface() {
                             key={i}
                             rehypePlugins={[rehypeHighlight]}
                           >
-                            {part.text}
+                            {stripPreviewMarker(part.text)}
                           </ReactMarkdown>
                         ) : (
                           <span key={i}>{part.text}</span>
@@ -237,6 +268,25 @@ export default function ChatInterface() {
                   </div>
                 </div>
               ))}
+
+              {workflowPreview && (
+                <div className="flex justify-start">
+                  <WorkflowPreviewCard
+                    preview={workflowPreview}
+                    onConfirm={() => setWorkflowPreview(null)}
+                    onEdit={() => {
+                      const lastUserMessage = [...messages]
+                        .reverse()
+                        .find((m) => m.role === "user");
+                      const text =
+                        lastUserMessage?.parts.find((p) => p.type === "text")
+                          ?.text ?? "";
+                      setInput(text);
+                      setWorkflowPreview(null);
+                    }}
+                  />
+                </div>
+              )}
               <div ref={bottomRef} />
             </div>
           )}
