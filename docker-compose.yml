@@ -10,6 +10,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh
 
   n8n:
     image: n8nio/n8n:latest
@@ -22,7 +23,7 @@ services:
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_DATABASE=flowpilot
+      - DB_POSTGRESDB_DATABASE=n8n # <-- separate DB
       - DB_POSTGRESDB_USER=flowpilot
       - DB_POSTGRESDB_PASSWORD=flowpilot
     depends_on:

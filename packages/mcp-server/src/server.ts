@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { pool } from "./db.js";
 
 const sanitizeWorkflow = (obj: unknown): unknown => {
   if (Array.isArray(obj)) return obj.map(sanitizeWorkflow);
@@ -208,5 +209,115 @@ export const createMcpServer = (): McpServer => {
       };
     },
   );
+
+  server.registerTool(
+    "activate_workflow",
+    {
+      description: "Activate or deactivate an n8n workflow by name or ID.",
+      inputSchema: {
+        workflowIdOrName: z
+          .string()
+          .describe("The workflow ID (numeric string) or its name"),
+        active: z
+          .boolean()
+          .describe("true to activate the workflow, false to deactivate it"),
+      },
+    },
+    async ({ workflowIdOrName, active }) => {
+      const baseUrl = process.env.N8N_BASE_URL;
+      const apiKey = process.env.N8N_API_KEY;
+
+      // Step 1: Resolve name → id if needed
+      let workflowId = workflowIdOrName;
+      let workflowName = workflowIdOrName;
+      const looksLikeId = /^\d+$/.test(workflowIdOrName);
+
+      if (!looksLikeId) {
+        const listResponse = await fetch(
+          `${baseUrl}/api/v1/workflows?limit=100`,
+          { headers: { "X-N8N-API-KEY": apiKey! } },
+        );
+        const listData = (await listResponse.json()) as {
+          data: { id: string; name: string; active: boolean }[];
+        };
+
+        const match = listData.data.find((wf) =>
+          wf.name.toLowerCase().includes(workflowIdOrName.toLowerCase()),
+        );
+
+        if (!match) {
+          const suggestions = listData.data
+            .map((wf) => `• ${wf.name} (ID: ${wf.id})`)
+            .join("\n");
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Workflow not found for: "${workflowIdOrName}".\n\nAvailable workflows:\n${suggestions}`,
+              },
+            ],
+          };
+        }
+
+        workflowId = match.id;
+        workflowName = match.name;
+
+        // Step 2: No-op check — already in target state?
+        if (match.active === active) {
+          const state = active ? "already active" : "already inactive";
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Workflow "${workflowName}" is ${state}. No changes made.`,
+              },
+            ],
+          };
+        }
+      }
+
+      // Step 3: PATCH the workflow state
+      const response = await fetch(
+        `${baseUrl}/api/v1/workflows/${workflowId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "X-N8N-API-KEY": apiKey!,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ active }),
+        },
+      );
+
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to update workflow "${workflowName}". n8n returned status ${response.status}.`,
+            },
+          ],
+        };
+      }
+
+      const action = active ? "activated" : "deactivated";
+
+      await pool.query(
+        `INSERT INTO audit_logs ("id", "workflowId", "action", "createdAt")
+   VALUES (gen_random_uuid(), $1, $2, NOW())`,
+        [workflowId, action],
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Workflow "${workflowName}" has been ${action}.`,
+          },
+        ],
+      };
+    },
+  );
+
   return server;
 };
