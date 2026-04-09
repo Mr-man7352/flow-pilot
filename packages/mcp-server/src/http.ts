@@ -22,18 +22,28 @@ export const createHttpServer = () => {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless mode
     });
-    console.log(
+    console.error(
       "Received MCP request, connecting server and handling request...",
     );
     await server.connect(transport);
     await transport.handleRequest(incoming, outgoing);
   });
 
-  const port = Number(process.env.MCP_SERVER_PORT ?? 3001);
+  const port = Number(process.env.MCP_SERVER_PORT ?? 3002);
 
-  serve({ fetch: app.fetch, port }, () => {
-    console.log(`FlowPilot HTTP server listening on port ${port}`);
+  const server = serve({ fetch: app.fetch, port });
+
+  server.on("listening", () => {
+    console.error(`FlowPilot HTTP server listening on port ${port}`);
   });
-
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`Port ${port} busy → retrying on ${port + 1}`);
+      serve({ fetch: app.fetch, port: port + 1 });
+    } else {
+      console.error(err);
+      process.exit(1);
+    }
+  });
   return app;
 };

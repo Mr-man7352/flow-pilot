@@ -11,7 +11,7 @@ async function main() {
   const server = createMcpServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.log("FlowPilot MCP server running...");
+  console.error("FlowPilot MCP server running...");
 }
 
 main();
