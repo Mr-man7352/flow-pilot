@@ -2,6 +2,32 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { pool } from "./db.js";
 
+// ---------------------------------------------------------------------------
+// In-memory TTL cache (US-07)
+// ---------------------------------------------------------------------------
+interface CacheEntry<T> {
+  data: T;
+  expiresAt: number;
+}
+
+const cache = new Map<string, CacheEntry<unknown>>();
+
+function getCached<T>(key: string): T | undefined {
+  const entry = cache.get(key) as CacheEntry<T> | undefined;
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiresAt) {
+    cache.delete(key);
+    return undefined;
+  }
+  return entry.data;
+}
+
+function setCached<T>(key: string, data: T, ttlMs: number): void {
+  cache.set(key, { data, expiresAt: Date.now() + ttlMs });
+}
+
+// ---------------------------------------------------------------------------
+
 const sanitizeWorkflow = (obj: unknown): unknown => {
   if (Array.isArray(obj)) return obj.map(sanitizeWorkflow);
 
@@ -319,5 +345,94 @@ export const createMcpServer = (): McpServer => {
     },
   );
 
+  // -------------------------------------------------------------------------
+  // US-07: List Available Credentials
+  // -------------------------------------------------------------------------
+  server.registerTool(
+    "get_credentials",
+    {
+      description:
+        "List all credentials configured in the n8n instance. Returns name and type only — no secrets, tokens, or passwords.",
+      inputSchema: {},
+    },
+    async () => {
+      const CACHE_KEY = "credentials";
+      const TTL_MS = 60_000; // 60 seconds
+
+      // Return cached result if still fresh
+      const cached = getCached<{ id: string; name: string; type: string }[]>(
+        CACHE_KEY,
+      );
+      if (cached) {
+        return buildCredentialsResponse(cached);
+      }
+
+      const baseUrl = process.env.N8N_BASE_URL;
+      const apiKey = process.env.N8N_API_KEY;
+
+      const response = await fetch(`${baseUrl}/api/v1/credentials`, {
+        headers: { "X-N8N-API-KEY": apiKey! },
+      });
+
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Failed to fetch credentials. n8n returned status ${response.status}.`,
+            },
+          ],
+        };
+      }
+
+      const raw = (await response.json()) as {
+        data: Record<string, unknown>[];
+      };
+
+      // Allowlist: id, name, type only — strip everything else
+      const credentials = raw.data.map((c) => ({
+        id: String(c.id ?? ""),
+        name: String(c.name ?? ""),
+        type: String(c.type ?? ""),
+      }));
+
+      setCached(CACHE_KEY, credentials, TTL_MS);
+
+      return buildCredentialsResponse(credentials);
+    },
+  );
+
   return server;
 };
+
+// ---------------------------------------------------------------------------
+// Helper — shared response builder for get_credentials (used for cached
+// and fresh responses)
+// ---------------------------------------------------------------------------
+function buildCredentialsResponse(
+  credentials: { id: string; name: string; type: string }[],
+) {
+  if (credentials.length === 0) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: "No credentials are configured yet.\n\nTo add credentials, visit the n8n editor and go to **Settings → Credentials**.",
+        },
+      ],
+    };
+  }
+
+  const list = credentials
+    .map((c) => `• ${c.name} (${c.type})`)
+    .join("\n");
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: `Available credentials:\n\n${list}`,
+      },
+    ],
+  };
+}
