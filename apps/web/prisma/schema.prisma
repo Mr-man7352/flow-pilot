@@ -32,10 +32,24 @@ model ChatMessage {
 }
 
 model AuditLog {
-  id         String   @id @default(cuid())
-  workflowId String
-  action     String // "activated" or "deactivated"
-  createdAt  DateTime @default(now())
+  id          String   @id @default(cuid())
+  workflowId  String
+  action      String   // "activated", "deactivated", "workflow_created", "workflow_create_failed"
+  description String?  // original natural-language description (US-08)
+  metadata    Json?    // { jsonHash, status, error? } (US-08)
+  createdAt   DateTime @default(now())
 
   @@map("audit_logs")
+}
+
+model WorkflowExecution {
+  id          String    @id @default(cuid())
+  workflowId  String    @map("workflow_id")
+  executionId String?   @map("execution_id") // n8n execution ID
+  status      String    @map("status")        // "running" | "success" | "error" | "unknown" | "timeout"
+  startedAt   DateTime  @default(now()) @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  result      Json?     @map("result")        // execution output data or error message
+
+  @@map("workflow_executions")
 }

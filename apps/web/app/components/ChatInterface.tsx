@@ -15,11 +15,105 @@ interface Session {
   updatedAt: string;
 }
 
-function stripPreviewMarker(text: string): string {
-  return text
-    .replace(/<<<WORKFLOW_PREVIEW>>>[\s\S]*?<<<END_WORKFLOW_PREVIEW>>>/g, "")
-    .trim();
+interface ToolInvocationPart {
+  type: string; // "tool-draft_workflow", "tool-list_workflows", etc.
+  toolCallId: string;
+  title?: string;
+  state: string;
+  input?: unknown;
+  output?: unknown;
+  errorText?: string;
 }
+
+// Shape the MCP tool returns inside result.content[0].text
+interface DraftPreviewPayload {
+  name: string;
+  description?: string;
+  nodeCount: number;
+  json: object;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Human-readable tool name for the UI chips */
+const TOOL_LABELS: Record<string, string> = {
+  draft_workflow: "Designing workflow",
+  create_workflow: "Creating workflow",
+  list_workflows: "Listing workflows",
+  get_workflow: "Fetching workflow",
+  activate_workflow: "Updating workflow",
+  get_credentials: "Loading credentials",
+  execute_workflow: "Running workflow",
+};
+
+/** Extract the tool name from the ai@6 part type: "tool-draft_workflow" → "draft_workflow" */
+function getToolName(partType: string): string {
+  return partType.startsWith("tool-")
+    ? partType.slice("tool-".length)
+    : partType;
+}
+
+function toolLabel(partType: string) {
+  const name = getToolName(partType);
+  return TOOL_LABELS[name] ?? name.replace(/_/g, " ");
+}
+
+/**
+ * Extract draft preview data from a draft_workflow tool output.
+ * The MCP tool execute() function returns a string starting with:
+ *   FLOWPILOT_DRAFT_PREVIEW\n<JSON>
+ */
+function extractDraftPreview(output: unknown): WorkflowPreview | null {
+  try {
+    // In ai@6, tool output is the value returned by execute() — a string in our case
+    const text = typeof output === "string" ? output : String(output ?? "");
+    if (!text.startsWith("FLOWPILOT_DRAFT_PREVIEW")) return null;
+    const json = text.slice("FLOWPILOT_DRAFT_PREVIEW\n".length);
+    const data = JSON.parse(json) as DraftPreviewPayload;
+    return {
+      name: data.name,
+      nodeCount: data.nodeCount,
+      json: data.json,
+      description: data.description ?? data.name,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ToolCallChip — inline indicator shown for every tool invocation
+// ---------------------------------------------------------------------------
+
+function ToolCallChip({ part }: { part: ToolInvocationPart }) {
+  const label = toolLabel(part.type);
+  // In ai@6: "output" = completed, "output-denied" = denied, everything else = in progress
+  const isRunning =
+    part.state !== "output-available" && part.state !== "output-denied";
+
+  return (
+    <div
+      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium border ${
+        isRunning
+          ? "bg-blue-50 border-blue-200 text-blue-700"
+          : "bg-zinc-50 border-zinc-200 text-zinc-500"
+      }`}
+    >
+      {isRunning ? (
+        <span className="inline-block h-2.5 w-2.5 rounded-full border-2 border-blue-500 border-t-transparent animate-spin" />
+      ) : (
+        <span className="text-green-500">✓</span>
+      )}
+      {isRunning ? `${label}…` : label}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
 
 export default function ChatInterface() {
   const [input, setInput] = useState("");
@@ -35,12 +129,14 @@ export default function ChatInterface() {
       : "",
   );
   const bottomRef = useRef<HTMLDivElement>(null);
-
   const activeSessionIdRef = useRef<string | null>(null);
 
   const authHeader = `Bearer ${apiKey}`;
 
-  // Fetch session list
+  // ---------------------------------------------------------------------------
+  // Session management
+  // ---------------------------------------------------------------------------
+
   const fetchSessions = async () => {
     const res = await fetch("/api/sessions", {
       headers: { Authorization: authHeader },
@@ -48,7 +144,7 @@ export default function ChatInterface() {
     if (res.ok) setSessions(await res.json());
   };
 
-  // Keep ref in sync with state
+  // Keep ref in sync with state (avoids stale closure in transport)
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
@@ -57,13 +153,16 @@ export default function ChatInterface() {
     fetchSessions();
   }, []);
 
+  // ---------------------------------------------------------------------------
+  // Chat transport
+  // ---------------------------------------------------------------------------
+
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
         api: "/api/chat",
         headers: { Authorization: authHeader },
         fetch: async (url, init) => {
-          // Inject current sessionId into every request
           const body = JSON.parse((init?.body as string) ?? "{}");
           const res = await fetch(url, {
             ...init,
@@ -72,7 +171,7 @@ export default function ChatInterface() {
               sessionId: activeSessionIdRef.current,
             }),
           });
-          // Capture session ID from first response in a new conversation
+          // Capture new session ID on first request
           const newSessionId = res.headers.get("X-Session-Id");
           if (newSessionId && !activeSessionIdRef.current) {
             activeSessionIdRef.current = newSessionId;
@@ -81,7 +180,7 @@ export default function ChatInterface() {
           return res;
         },
       }),
-    [apiKey], // No longer depends on activeSessionId — ref handles that
+    [apiKey],
   );
 
   const { messages, sendMessage, status, setMessages } = useChat({
@@ -91,28 +190,32 @@ export default function ChatInterface() {
 
   const isLoading = status === "streaming" || status === "submitted";
 
-  // Auto-scroll
+  // ---------------------------------------------------------------------------
+  // Extract draft_workflow preview from tool-invocation parts
+  // ---------------------------------------------------------------------------
+
   useEffect(() => {
+    // Auto-scroll
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
 
+    // Scan all assistant messages for a completed draft_workflow tool call.
+    // ai@6: tool parts have type "tool-draft_workflow" and state "output" when done.
     for (const m of messages) {
       if (m.role !== "assistant") continue;
-      const text = m.parts.find((p) => p.type === "text")?.text ?? "";
-      const match = text.match(
-        /<<<WORKFLOW_PREVIEW>>>\s*([\s\S]*?)\s*<<<END_WORKFLOW_PREVIEW>>>/,
-      );
-      if (match) {
-        try {
-          const data = JSON.parse(match[1]);
-          setWorkflowPreview({
-            name: data.name,
-            nodeCount: data.nodeCount,
-            json: data.json,
-          });
-        } catch {
-          // malformed JSON, ignore
+      for (const part of m.parts) {
+        const p = part as unknown as ToolInvocationPart;
+        console.log("Checking part for draft preview:", p);
+        if (
+          typeof p.type === "string" &&
+          p.type === "tool-draft_workflow" &&
+          p.state === "output-available"
+        ) {
+          const preview = extractDraftPreview(p.output);
+          if (preview) {
+            setWorkflowPreview(preview);
+            return;
+          }
         }
-        break;
       }
     }
   }, [messages]);
@@ -124,9 +227,14 @@ export default function ChatInterface() {
     }
   }, [status]);
 
-  // Load a past session
+  // ---------------------------------------------------------------------------
+  // Session actions
+  // ---------------------------------------------------------------------------
+
   const loadSession = async (session: Session) => {
-    const res = await fetch(`/api/sessions/${session.id}/messages`);
+    const res = await fetch(`/api/sessions/${session.id}/messages`, {
+      headers: { Authorization: authHeader },
+    });
     if (!res.ok) return;
 
     const dbMessages: { id: string; role: string; content: string }[] =
@@ -142,14 +250,15 @@ export default function ChatInterface() {
     setInitialMessages(converted);
     setMessages(converted);
     setActiveSessionId(session.id);
+    setWorkflowPreview(null);
   };
 
-  // Start a new conversation
   const newConversation = () => {
     setMessages([]);
     setInitialMessages([]);
     setActiveSessionId(null);
     setInput("");
+    setWorkflowPreview(null);
   };
 
   const submit = () => {
@@ -160,6 +269,10 @@ export default function ChatInterface() {
   };
 
   const hasMessages = messages.length > 0;
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
 
   return (
     <div className="flex h-screen bg-zinc-100">
@@ -251,42 +364,57 @@ export default function ChatInterface() {
                         : "bg-white text-zinc-800 shadow-sm"
                     }`}
                   >
-                    {m.parts.map((part, i) =>
-                      part.type === "text" ? (
-                        m.role === "assistant" ? (
+                    {m.parts.map((part, i) => {
+                      // Plain text
+                      if (part.type === "text") {
+                        return m.role === "assistant" ? (
                           <ReactMarkdown
                             key={i}
                             rehypePlugins={[rehypeHighlight]}
                           >
-                            {stripPreviewMarker(part.text)}
+                            {part.text}
                           </ReactMarkdown>
                         ) : (
                           <span key={i}>{part.text}</span>
-                        )
-                      ) : null,
-                    )}
+                        );
+                      }
+
+                      // Tool invocation — ai@6 uses type "tool-${name}" for tool parts
+                      if (
+                        typeof part.type === "string" &&
+                        part.type.startsWith("tool-")
+                      ) {
+                        const tip = part as unknown as ToolInvocationPart;
+                        return (
+                          <div key={i} className="my-1.5">
+                            <ToolCallChip part={tip} />
+                          </div>
+                        );
+                      }
+
+                      return null;
+                    })}
                   </div>
                 </div>
               ))}
 
+              {/* Workflow preview card — shown after draft_workflow completes */}
               {workflowPreview && (
                 <div className="flex justify-start">
                   <WorkflowPreviewCard
                     preview={workflowPreview}
-                    onConfirm={() => setWorkflowPreview(null)}
+                    apiKey={apiKey}
+                    onDismiss={() => setWorkflowPreview(null)}
                     onEdit={() => {
-                      const lastUserMessage = [...messages]
-                        .reverse()
-                        .find((m) => m.role === "user");
-                      const text =
-                        lastUserMessage?.parts.find((p) => p.type === "text")
-                          ?.text ?? "";
-                      setInput(text);
+                      const description =
+                        workflowPreview.description ?? workflowPreview.name;
+                      setInput(description);
                       setWorkflowPreview(null);
                     }}
                   />
                 </div>
               )}
+
               <div ref={bottomRef} />
             </div>
           )}
